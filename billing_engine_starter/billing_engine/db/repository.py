@@ -41,10 +41,10 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Optional
 
-from billing_engine.db.database import Database
-from billing_engine.db import queries as q
-from billing_engine.money import Money
-from billing_engine.models import (
+from .database import Database
+from . import queries as q
+from ..money import Money
+from ..models import (
     Customer,
     Plan, PricingType, BillingPeriod,
     Subscription, SubscriptionStatus,
@@ -362,9 +362,12 @@ class SubscriptionRepository:
         )
 
     def update_plan(self, subscription_id: int, new_plan_id: int) -> None:
-        # TODO Day 4.
-        # Hint: q.update_subscription_plan(...)
-        raise NotImplementedError("Day 4: implement SubscriptionRepository.update_plan")
+        with self.db.transaction() as conn:
+            q.update_subscription_plan(
+                conn,
+                subscription_id,
+                new_plan_id,
+            )
 
 
 # ============================================================
@@ -458,19 +461,21 @@ class InvoiceRepository:
         return cur.fetchone()[0]
 
     def mark_paid(self, invoice_id: int) -> None:
-        # TODO Day 4.
-        # Hint: q.update_invoice_status(..., "PAID")
-        raise NotImplementedError("Day 4: implement InvoiceRepository.mark_paid")
+        with self.db.transaction() as conn:
+            q.update_invoice_status(
+                conn,
+                invoice_id,
+                "PAID",
+            )
 
     def mark_failed(self, invoice_id: int) -> None:
-        # TODO Day 4.
-        # Hint: q.update_invoice_status(..., "FAILED")
-        raise NotImplementedError("Day 4: implement InvoiceRepository.mark_failed")
+        """Mark invoice as FAILED (used when dunning gives up)."""
+        with self.db.transaction() as conn:
+            q.update_invoice_status(conn, invoice_id, "FAILED")
 
     def set_pdf_path(self, invoice_id: int, path: str) -> None:
-        # TODO Day 4.
-        # Hint: q.update_invoice_pdf_path(...)
-        raise NotImplementedError("Day 4: implement InvoiceRepository.set_pdf_path")
+        with self.db.transaction() as conn:
+            q.update_invoice_pdf_path(conn, invoice_id, path)
 
 
 class InvoiceLineItemRepository:
