@@ -28,7 +28,7 @@ Implement the retry state machine in `attempt(...)` and the helper `should_cance
 
 The gateway and attempt-repository pieces should already be available from Day 3.
 
-Core flow:
+Start with this concrete code sample:
 
 ```python
 def attempt(self, invoice: Invoice, customer_id: int, now: datetime) -> DunningOutcome:
@@ -60,12 +60,39 @@ def attempt(self, invoice: Invoice, customer_id: int, now: datetime) -> DunningO
     return DunningOutcome(DunningState.RETRYING, attempt_no, next_retry)
 ```
 
-And the helper:
+And the helper sample:
 
 ```python
 @staticmethod
 def should_cancel(past_due_since: date, today: date, grace_days: int = 7) -> bool:
     return (today - past_due_since).days >= grace_days
+```
+
+**Pseudocode**
+```text
+attempt():
+  attempt_no = prior_attempts + 1
+  result = gateway.charge(invoice)
+
+  if success:
+    mark invoice PAID
+    post ledger CREDIT
+    save SUCCESS payment_attempt
+    return SUCCEEDED
+
+  if failed and this was final attempt:
+    mark invoice FAILED
+    mark subscription PAST_DUE with date
+    save FAILED payment_attempt (no retry time)
+    return FAILED_FINAL
+
+  otherwise:
+    compute next retry time from retry-delay table
+    save FAILED payment_attempt (with next_retry_at)
+    return RETRYING
+
+should_cancel():
+  return (today - past_due_since).days >= grace_days
 ```
 
 Run `pytest tests/test_dunning.py -v`.
@@ -74,6 +101,8 @@ Run `pytest tests/test_dunning.py -v`.
 File: `billing_engine/billing/proration.py`
 
 This is the headline algorithm of the capstone.
+
+Use this code sample as the exact order of operations:
 
 ```python
 def compute_proration(
@@ -106,6 +135,27 @@ def compute_proration(
     return ProrationResult(credit_amount, charge_amount, credit_tax, charge_tax)
 ```
 
+**Pseudocode**
+```text
+validate inputs:
+  switch_date inside billing period
+  currencies match
+  period length > 0
+
+compute ratio:
+  total_days = period_end - period_start
+  remaining_days = period_end - switch_date
+  ratio = remaining_days / total_days
+
+compute amounts:
+  credit = old_plan_price * ratio
+  charge = new_plan_price * ratio
+  credit_tax = tax(credit)
+  charge_tax = tax(charge)
+
+return ProrationResult(credit, charge, credit_tax, charge_tax)
+```
+
 Run `pytest tests/test_proration.py -v`.
 
 ## Step 4 — Wire `upgrade_subscription`
@@ -122,6 +172,28 @@ Implement the mid-cycle upgrade flow:
 
 You will likely need `SubscriptionRepository.update_plan(...)`.
 
+**Code sample (shape only):**
+```python
+with self.db.transaction() as conn:
+    pr = compute_proration(...)
+    invoice = self.invoice_repo.add(Invoice(...))
+    self.line_item_repo.add(InvoiceLineItem(..., kind=LineItemKind.PRORATION_CREDIT))
+    self.line_item_repo.add(InvoiceLineItem(..., kind=LineItemKind.PRORATION_CHARGE))
+    self.ledger_repo.add(LedgerEntry(..., direction=LedgerDirection.DEBIT, ...))
+    self.subscription_repo.update_plan(subscription_id, new_plan_id)
+```
+
+**Pseudocode**
+```text
+load subscription + old plan + new plan + customer
+calculate old/new plan prices
+call compute_proration()
+create proration invoice
+add credit and charge line items
+post matching ledger debit
+switch subscription to new plan
+```
+
 ## Step 5 — Build the CLI
 File: `billing_engine/cli.py`
 
@@ -136,6 +208,30 @@ billing bill run [--date YYYY-MM-DD]
 billing invoice show INVOICE_ID
 billing upgrade SUBSCRIPTION_ID NEW_PLAN_ID [--date YYYY-MM-DD]
 billing demo
+```
+
+**Code sample (`argparse` skeleton):**
+```python
+parser = argparse.ArgumentParser(prog="billing")
+sub = parser.add_subparsers(dest="cmd", required=True)
+
+sub.add_parser("init")
+plan_cmd = sub.add_parser("plan")
+plan_sub = plan_cmd.add_subparsers(dest="plan_subcmd", required=True)
+plan_sub.add_parser("list")
+```
+
+**Pseudocode**
+```text
+parse args
+dispatch by subcommand
+  init -> create db + schema
+  customer add -> insert customer
+  subscribe -> insert subscription
+  bill run -> BillingCycle.run(date)
+  invoice show -> print invoice + line items
+  upgrade -> run upgrade flow
+  demo -> run scripted scenario
 ```
 
 For `billing invoice show`, print a plain-text invoice like this:
@@ -160,6 +256,16 @@ TOTAL:                       {total}
 
 ## Step 6 — End-to-end scenario
 Read `tests/test_demo_scenario.py::test_full_lifecycle` and implement `run_demo()` to perform the same sequence with human-readable output.
+
+**Pseudocode**
+```text
+init db
+create customer + plans + subscription
+run billing cycle
+simulate failed then successful payment attempts
+upgrade mid-cycle
+show proration invoice and final ledger snapshot
+```
 
 Run:
 
