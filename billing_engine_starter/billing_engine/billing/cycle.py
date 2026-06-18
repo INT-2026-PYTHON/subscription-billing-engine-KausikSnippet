@@ -9,13 +9,23 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Callable, Optional
 
+from billing_engine.billing.proration import compute_proration
+
 from billing_engine.db import (
     Database,
     CustomerRepository, PlanRepository, SubscriptionRepository,
     UsageRecordRepository, InvoiceRepository, InvoiceLineItemRepository,
-    LedgerRepository,
+    LedgerRepository
 )
-from billing_engine.models import Subscription
+from billing_engine.models import (
+    Subscription,
+    Invoice,
+    InvoiceLineItem,
+    InvoiceStatus,
+    LedgerEntry,
+    LedgerDirection,
+    LineItemKind,
+)
 
 
 @dataclass
@@ -57,11 +67,75 @@ class BillingCycle:
     # --------------------------------------------------------
     def run(self, as_of: date) -> BillingResult:
         """Bill all subscriptions whose current period ends on or before `as_of`."""
-        # TODO Day 3
-        raise NotImplementedError("Day 3: implement BillingCycle.run")
+        result = BillingResult(0, 0, 0)
+        
+        # Safe imports based on the test file we now see!
+        import calendar
+        from billing_engine.models import (
+            Invoice, LedgerEntry, 
+            InvoiceStatus, SubscriptionStatus, LedgerDirection, InvoiceLineItem, invoice, LedgerEntry, LineItemKind
+        )
 
     # --------------------------------------------------------
     def upgrade_subscription(self, subscription_id: int, new_plan_id: int, switch_date: date) -> None:
         """Mid-cycle upgrade — Day 4 stretch."""
-        # TODO Day 4
-        raise NotImplementedError("Day 4: implement BillingCycle.upgrade_subscription")
+        sub = self.subscription_repo.get(subscription_id)
+        old_plan = self.plan_repo.get(sub.plan_id)
+        new_plan = self.plan_repo.get(new_plan_id)
+        customer = self.customer_repo.get(sub.customer_id)
+
+        old_price = self.strategy_factory(old_plan).calculate(0)
+        new_price = self.strategy_factory(new_plan).calculate(0)
+        tax_calc, tax_context = self.tax_factory(customer)
+    
+        pr = compute_proration(
+             old_plan_price=old_price,
+             new_plan_price=new_price,
+             period_start=sub.current_period_start,
+             period_end=sub.current_period_end,
+             switch_date=switch_date,
+             tax_calc=tax_calc,
+             tax_context=tax_context,
+        )
+
+        subtotal = pr.charge_amount - pr.credit_amount
+        tax_total = pr.charge_tax - pr.credit_tax
+        total = subtotal + tax_total
+        discount_total = old_price - old_price
+
+        invoice = self.invoice_repo.add(Invoice(
+            id=None,
+            subscription_id=sub.id,
+            period_start=sub.current_period_start,
+            period_end=sub.current_period_end,
+            currency=old_price.currency,
+            subtotal=subtotal,
+            discount_total=discount_total,
+            tax_total=tax_total,
+            total=total,
+            status=InvoiceStatus.ISSUED,
+            issued_at=switch_date,
+        ))
+
+        self.line_item_repo.add(InvoiceLineItem(
+             id=None, invoice_id=invoice.id,
+             description=f"Credit for unused time on {old_plan.name}",
+             amount=-pr.credit_amount,
+             kind=LineItemKind.PRORATION_CREDIT,
+        )) 
+
+        self.line_item_repo.add(InvoiceLineItem(
+             id=None, invoice_id=invoice.id,
+             description=f"Charge for remaining time on {new_plan.name}",
+             amount=pr.charge_amount,
+             kind=LineItemKind.PRORATION_CHARGE,
+        ))
+ 
+        self.ledger_repo.add(LedgerEntry( 
+             id=None, invoice_id=invoice.id, customer_id=customer.id, 
+             amount=total, direction=LedgerDirection.DEBIT,
+             reason=f"Proration for upgrade to {new_plan.name} (invoice #{invoice.id})",
+        ))
+        self.subscription_repo.update_plan(subscription_id, new_plan_id)  
+
+        return invoice 
